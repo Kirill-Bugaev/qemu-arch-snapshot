@@ -1,0 +1,408 @@
+###############################################################################################
+# Section 1.
+# Create bootable virtual disk device for QEMU from Arch Linux have been installed on hardware.
+###############################################################################################
+The method use Linux Software RAID mdadm utility which require --chunk= parameter (see step 7), which can't be less then 1Kib. Size of each patition snapshot (see step 4) should be divisible by it, otherwise partition will not be embed correctly into virtual disk device. If size of certain partition is not divisible by value of --chunk= parameter, you should resize up (with qemu-img utility or other one) corresponding snapshot to make it divisible. Although you should enter real sizes of partitions on step 8. 
+
+1. Open terminal and change current directory to where partition raw files will be located. Ad hoc:
+	$ cd /ehdd/qemu/arch_hw
+
+2. Create a file wich will contains first part of GPT Partition Table: Protective MBR, Primary GPT Header and Partition Entries of future virtual disk device. Size of this file should be greater than or equal to minimal byte offset (which will depend on whole disk size) of first partition when fdisk utility is used (fdisk gives and takes the offset in 512-byte sectors, so multiply by 512 to get the correct byte offset) and be divisible by --chunk parameter of mdadm command (see step 7). 1Mib or 2048 counts of dd utility is enough ad hoc (dd takes the count in 512-byte sectors, so divide by 512 to get the correct value of count parameter, 1Mib=1048576, 1048576/512=2048) 
+	$ dd if=/dev/zero of=gpt1 count=2048 
+
+3. Create a file wich will contains the second part of GPT Partition Table: Partition Entries and Secondary GPT Header. Size of this file should be greater than or equal to 16896 bytes (16.5Kb) and be divisible by --chunk parameter of mdadm command (see step 7). 32Kib or 64 counts of dd utility is minimal enough ad hoc (dd takes the count in 512-byte sectors, so divide by 512 to get the correct value of count parameter, 32Kib=32768, 32768/512=64)
+	$ dd if=/dev/zero of=gpt2 count=64
+
+3. Create BIOS boot partition raw file with size of 1Mib or more for future GRUB installation (dd takes the count in 512-byte sectors, so divide by 512 to get the correct value of count parameter, 1Mib=1048576, 1048576/512=2048)
+	$ dd if=/dev/zero of=sda1_bios_boot.raw count=2048
+
+4. Snapshot Arch Linux system partitions with dd utility (or special script using dd) or decompress them from backup with gunzip utility (with script or manually) to partition raw files and locate to /ehdd/qemu/arch_hw ad hoc.
+	Mapping ad hoc
+		partition	mount point	raw file
+		/dev/sda5 	/boot	 	sda3_boot.raw
+		/dev/sda6 	/home 		sda4_home.raw
+		/dev/sda7 	/root 		sda5_root.raw
+		/dev/sda9 	/usr		sda7_usr.raw
+		/dev/sda10 	/var		sda8_var.raw
+	dd utility based script usage ad hoc
+		# /data/scripts/vm/take_arch_part_snapshot
+	or gunzip utility based script usage ad hoc
+		$ /data/scripts/vm/gunzip_arch_part_from_backup
+	Resize up snapshot images if their sizes are not divisible by value of --chunk= parameter of mdamd command (see step 7) to make them divisible (not required ad hoc)
+		$ qemu-img resize snapshot_image +nK
+	Or you can create partition raw file of desirable size for every real partition manually with "qemu-img" utility, make loopback device for each raw file with "losetup" utility, mount it, format to appropriate file system and then copy all files from real partition into partition raw file. This method allows shrink disk space occupied by partition raw files. Expected that all loopback devices are detached, otherwise detach them with "# losetup -D" command. Parameter "-a" for "cp" is important(!), without it files attributes (mode, ownership, time‐stamps) and additional attributes (context, links, xattr, all) aren't copied and guest QEMU vm will login correct only for root, also it enables copy directories recursively. For boot, home, root, usr and var partitions ad hoc (see step 6 for full partition table)
+		$ qemu-img create -f raw sda3_boot.raw 150M
+		# losetup -f sda3_boot.raw
+		# mkfs.ext4 /dev/loop0
+		# mount /dev/loop0 /mnt/tmp_boot
+		# cp -av /boot/* /mnt/tmp_boot
+ 		# umount /dev/loop0
+		# losetup -d /dev/loop0
+		...
+		$ qemu-img create -f raw sda8_var.raw 5G
+		# losetup -f sda8_var.raw
+		# mkfs.ext4 /dev/loop0
+		# mount /dev/loop0 /mnt/tmp_var
+		# cp -av /var/* /mnt/tmp_var
+ 		# umount /dev/loop0
+		# losetup -d /dev/loop0
+
+5. Create swap, tmp and data partition raw files ad hoc, with qemu-img or dd utilites and locate them to /ehdd/qemu/arch_hw ad hoc. Sizes of raw files should be divisible by --chunk parameter of mdadm command (see step 7). Ad hoc
+	$ qemu-img create -f raw sda2_swap.raw 4G
+	$ qemu-img create -f raw sda6_tmp.raw 5G	
+	$ qemu-img create -f raw sda9_data.raw 10G
+	Format tmp and data partition raw files to appropriate file systems (expected that all loopback devices are detached, otherwise detach them with "# losetup -D" command). Ad hoc
+		# losetup -D
+		# losetup -f sda6_tmp.raw
+		# losetup -f sda9_data.raw
+		# mkfs.ext4 /dev/loop0
+		# mkfs.ntfs -f /dev/loop1
+		# losetup -d /dev/loop0
+		# losetup -d /dev/loop1
+	Need (ad hoc, not necessary) to copy some applications data files into data partition raw file ad hoc
+		# losetup -f sda9_data.raw
+		# mount /dev/loop0 /mnt/vm_data_part
+		# cp -av /data/arch_sysfiles /mnt/vm_data_part
+ 		# umount /dev/loop0
+		# losetup -d /dev/loop0
+
+6. Create loopback devices for GPT parts and all partition raw files in the following sequence. 11 loopback devices are required. Should be sure that system has them enough. "max_loop" parameter of "loop" kernel module should be more or equal 11 (can put an entry in "/etc/modprobe.d" to load loop module with "max_loop=15" (e.g.) every time, or can put "loop.max_loop=15" on the kernel command-line, depending on "loop.ko" module built into kernel or not). Expected that all loopback devices are detached, otherwise detach them with "# losetup -D" command. Ad hoc
+	# losetup -f gpt1
+	# losetup -f sda1_bios_boot.raw
+	# losetup -f sda2_swap.raw
+	# losetup -f sda3_boot.raw
+	# losetup -f sda4_home.raw
+	# losetup -f sda5_root.raw
+	# losetup -f sda6_tmp.raw
+	# losetup -f sda7_usr.raw
+	# losetup -f sda8_var.raw
+	# losetup -f sda9_data.raw
+	# losetup -f gpt2
+	Mapping ad hoc
+		partition raw file	loop device	partition size (ad hoc)
+		gpt1			loop0		-
+		sda1_bios_boot.raw	loop1		1Mib
+		sda2_swap.raw		loop2		4Gib
+		sda3_boot.raw		loop3		1Gib
+		sda4_home.raw		loop4		5Gib
+		sda5_root.raw		loop5		10Gib
+		sda6_tmp.raw		loop6		5Gib
+		sda7_usr.raw		loop7		50Gib
+		sda8_var.raw		loop8		15Gib
+		sda9_data.raw		loop9		10Gib
+		gpt2			loop10		-
+
+7. Create the "merged" first part of GPT Partition Table + partition raw files + second part of GPT Partition Table. Can do this using software RAID in linear mode (need the linear.ko kernel driver) and a loopback devices: the trick is to dynamically prepend the first part and append the second part of GPT Partition Table to the partition raw files wish to embed in a QEMU virtual disk device. The resulting /dev/md0 is what will used as this device (parameter --chunk= should divide size of gpt1, gpt2 and all partition raw files, --raid-devices= should be equal to the sum of loopback devices). Ad hoc
+	# modprobe linears
+	# mdadm --build --verbose /dev/md0 --chunk=16K --level=linear --raid-devices=11 /dev/loop0 /dev/loop1 /dev/loop2 /dev/loop3 /dev/loop4 /dev/loop5 /dev/loop6 /dev/loop7 /dev/loop8 /dev/loop9 /dev/loop10 
+
+8. Create partition table of /dev/md0 device with fdisk utility, partition order should match the order of loopback devices in /dev/md0 device. Partition table should be GPT. Require to create 9 partitions. Sector offset of first partition should be equal gpt1 file size divided by sector size (1048576/512=2048 ad hoc). Size of each created partition should be equal to the size of corresponding snapshotted partition, except the BIOS boot partition (and swap, tmp and data partitions ad hoc) which size should be equal to corresponding raw file. Also need to enter correct partition offset (First sector) if the size of resized snapshot more then size of snapshotted partition. So if the size of third snapshot more then size of third snapshotted partition by N sectors, then should add N sectors to default "First sector" value of fourth partition so that boundaries of fourth created partition match the boundaries of fourths snapshotted partition into virtual disk device. First partition should have BIOS boot partition type, second should be Linux swap type. Should not(!) remove existed signatures of snapshotted partitions while creating partitions. Ad hoc
+	# fdisk /dev/md0
+	Ad hoc:
+		press "g" to "create a new empty GPT partition table",
+		press "n" to "add a new partition",
+		enter "Partition number" 1 (by default),
+		enter "First sector" 2048 (by default ad hoc),
+		enter "Last sector" +1M for md0p1 BIOS boot partition (sda1_bios_boot.raw correspond)
+		press "t" to "change a partition type",
+		enter Partition type 4 BIOS boot
+		===
+		press "n" to "add a new partition",
+		enter "Partition number" 2 (by default),
+		enter "First sector" 4096 (by default ad hoc),
+		enter "Last sector" +4G for md0p2 swap partition (sda2_swap.raw correspond)
+		press "t" to "change a partition type",
+		enter Partition type 19 Linux swap
+		===
+		etc.		
+		...
+		===
+		press "n" to "add a new partition",
+		enter "Partition number" 9 (by default),
+		enter "First sector" 188747776 (by default ad hoc),
+		enter "Last sector" +10G for md0p9 data partition (sda9_swap.raw correspond)
+		press "w" to "write table to disk and exit"
+
+9. Change a partition UUID of each partition that has been snapshotted (md0p3, md0p4, md0p5, md0p7, md0p8 ad hoc). Ad hoc 
+	# e2fsck -f /dev/md0p3
+	# tune2fs /dev/md0p3 -U `uuidgen`
+	...
+	# e2fsck -f /dev/md0p7
+	# tune2fs /dev/md0p7 -U `uuidgen`
+	# reiserfstune /dev/md0p8 -u `uuidgen`
+
+10. Correct Arch Linux system on virtual disk device
+	-- Method 1 --
+	a. Prepare bootable ISO image of Arch Linux. In this case need to make loopback device (loop11 ad hoc) with it. Ad hoc
+		# losetup -f /ehdd/distro/archlinux-2018.07.01-x86_64.iso
+	Or use a USB stick which this ISO image is written on (/dev/sdc ad hoc)		 
+
+	b. Set the permissions of virtual disk device and device with ISO image so that the emulator can access them. Ad hoc 
+		# chmod o=rw /dev/md0
+	and (in case of loopback device) ad hoc
+		# chmod o=r /dev/loop11
+	or (in case of USB stick)
+		# chmod o=r /dev/sdc
+
+	c. Start QEMU with boot menu on and virtual disk device and bootable ISO image device embedded as drive devices. Ad hoc (in case of loopback devive)
+		$ qemu-system-x86_64 -enable-kvm -m 2G -vga virtio -display gtk,gl=on -boot menu=on -cdrom /dev/loop11 -drive file=/dev/md0,format=raw 
+	or (in case of USB stick)
+		$ qemu-system-x86_64 -enable-kvm -m 2G -vga virtio -display gtk,gl=on -boot menu=on -cdrom /dev/sdc -drive file=/dev/md0,format=raw 
+
+	d. Press "Esc" and choose appropriate menu item for booting from Arch Linux bootable device (DVD/CD ad hoc).
+
+	e. Boot Arch Linux.
+
+	f. Make swap partition on disk device. Ad hoc
+		# mkswap /dev/sda2
+		# swapon /dev/sda2
+	
+	g. Mount root partition of disk device to /mnt. Ad hoc 
+		# mount /dev/sda5 /mnt 
+
+	h. Mount other partitions correspondingly. Ad hoc
+		partition	mount point
+		/dev/sda3	/mnt/boot
+		/dev/sda4	/mnt/home
+		/dev/sda6	/mnt/tmp
+		/dev/sda7	/mnt/usr
+		/dev/sda8	/mnt/var
+		/dev/sda9	/mnt/data
+
+	i. Save listing of lsblk command. Ad hoc 
+		$ lsblk -f /dev/sda > /mnt/tmp/lsblk_listing.txt
+
+	j. Change root into the mounted system. Ad hoc
+		# arch-chroot /mnt
+
+	k. Correct /boot/grub/grub.cfg and /etc/fstab according to the saved listing of lsblk command (/tmp/lsblk_listing.txt file ad hoc). Make other corrections if it is necessary (correct resume=UUID= kernel parameter in /boot/grub/grub.cfg and switch off /win7/win7_boot and /win7/win7_os mount points in /etc/fstab ad hoc).
+
+	l. Reinstall GRUB. Ad hoc
+		# grub-install --target=i386-pc /dev/sda
+
+	m. Switch off hibernation. Delete "resume" hook in /etc/mkinitcpio.conf ad hoc
+		HOOKS="base udev ^_resume_^ autodetect modconf block filesystems keyboard fsck usr shutdown"
+	and delete "resume" kernel parameter in /boot/grub/grub.cfg ad hoc
+		linux   /vmlinuz-linux root=UUID=677ae77d-7b09-4ab4-8326-f0e08b16909d ^_resume=UUID=dbc11ded-29b4-4a44-a8a0-d444237a9d8a_^ rw  quite
+
+	n. Recreate the initramfs image
+		# mkinitcpio -p linux
+		# mkinitcpio -p linux-custom
+
+	o. Shutdown virtual machine and detach loopback device with ISO image if it has been created. Ad hoc
+		# losetup -d /dev/loop11
+
+	-- Method 2 --
+	a. There are some problems with installation GRUB on /dev/md0 RAID device (maybe, GRUB can't be installed on RAID linear at all). So create loopback (loop11 ad hoc) device for /dev/md0
+		# losetup -f /dev/md0
+
+	b. Create a directory where root partition of new loopback device will be mounted and mount it. Ad hoc
+		# mkdir /mnt/chroot
+		# mount /dev/loop11p5 /mnt/chroot 
+
+	c. Mount other partitions correspondingly. Ad hoc
+		partition	mount point
+		/dev/loop11p3	/mnt/chroot/boot
+		/dev/loop11p4	/mnt/chroot/home
+		/dev/loop11p6	/mnt/chroot/tmp
+		/dev/loop11p7	/mnt/chroot/usr
+		/dev/loop11p8	/mnt/chroot/var
+		/dev/loop11p9	/mnt/chroot/data
+
+	d. Make swap. Ad hoc
+		# mkswap /dev/loop11p2
+
+	e. Save listing of lsblk command to lsblk_listing.txt. Ad hoc
+		# lsblk -f /dev/loop11 | sudo tee /mnt/chroot/tmp/lsblk_listing.txt
+
+	f. Change root into /mnt/chroot directory ad hoc
+		# arch-chroot /mnt/chroot
+
+	g. Correct /boot/grub/grub.cfg and /etc/fstab according to the lsblk_listing.txt file (/tmp/lsblk_listing.txt ad hoc). Don't forget to omit "/mnt/chroot" if mountpoints in /etc/fstab should be corrected; loop11pN partition will correspond (after QEMU start) sdaN partition on virtual disk device ad hoc. Make other corrections if it is necessary (correct resume=UUID= kernel parameter in /boot/grub/grub.cfg and switch off /win7/win7_boot and /win7/win7_os mount points in /etc/fstab ad hoc).
+
+	h. Install GRUB on loopback device. Ad hoc
+		# grub-install --target=i386-pc /dev/loop11
+
+ 	i. Exit the chroot environment
+		$ exit
+
+	j. Unmount all partitions of loop11 device in following order and detach loopback device. Ad hoc
+		# umount /dev/loop11p3
+		# umount /dev/loop11p4
+		# umount /dev/loop11p6
+		# umount /dev/loop11p7
+		# umount /dev/loop11p8
+		# umount /dev/loop11p9
+		# umount /dev/loop11p5
+		# losetup -d /dev/loop11
+	
+	k. Set the permissions of virtual disk device so that the emulator can access it. Ad hoc 
+		# chmod o=rw /dev/md0
+
+	l. Start virtual machine with embedded virtual disk drive
+		$ qemu-system-x86_64 -enable-kvm -m 2G -vga virtio -display gtk,gl=on -soundhw ac97 -drive file=/dev/md0,format=raw 
+
+	m. Boot the system in fallback initramfs mode (choose appropriate item in GRUB menu). To show GRUB menu for a boot press and hold Shift.
+
+	n. Switch off hibernation. Delete "resume" hook in /etc/mkinitcpio.conf ad hoc
+		HOOKS="base udev ^_resume_^ autodetect modconf block filesystems keyboard fsck usr shutdown"
+	and delete "resume" kernel parameter in /boot/grub/grub.cfg ad hoc
+		linux   /vmlinuz-linux root=UUID=677ae77d-7b09-4ab4-8326-f0e08b16909d ^_resume=UUID=dbc11ded-29b4-4a44-a8a0-d444237a9d8a_^ rw  quite
+
+	o. Recreate the initramfs image
+		# mkinitcpio -p linux
+		# mkinitcpio -p linux-custom
+
+	p. Shutdown or restart virtual machine.
+
+11. Start virtual machine with embedded virtual disk drive and boot the system
+	$ qemu-system-x86_64 -enable-kvm -m 2G -vga virtio -display gtk,gl=on -soundhw ac97 -drive file=/dev/md0,format=raw 
+
+12. Don't forget disable 
+	internet_on,
+	make_tap_if_for_qemu or/and make_bridge_if_for_qemu or/and make_vde_for_qemu,
+	dhcpd4,
+	smb,
+	smartd,
+	postfix (optional),
+	atd (optional),
+	cronie (optional)
+and other systemd services wich can screw up functioning of vm and and will not be used by guest machine. Ad hoc
+	# systemctl disable internet_on
+	# systemctl disable make_tap_if_for_qemu
+	...
+
+13. Could switch off automatic login for user. Comment the following strokes in /etc/systemd/system/getty@tty1.service.d/override.conf ad hoc
+	[Service]
+	Type=simple
+	ExecStart=
+	ExecStart=-/usr/bin/agetty --autologin user1 --noclear %I $TERM
+
+14. Switch off autostart X at login for user. Comment the following strokes in /home/user1/.bash_profile ad hoc
+	if [[ ! $DISPLAY && $XDG_VTNR -eq 1 ]]; then
+	  startx &> /dev/null
+	fi
+
+15. After work with QEMU is finished should deactivate RAID virtual disk device and detach all engaged loopback devices. Ad hoc
+	# mdadm --stop /dev/md0
+	and
+	# losetup -d /dev/loop0
+ 	# losetup -d /dev/loop1
+	# losetup -d /dev/loop2
+	# losetup -d /dev/loop3
+	# losetup -d /dev/loop4
+	# losetup -d /dev/loop5
+	# losetup -d /dev/loop6
+	# losetup -d /dev/loop7
+	# losetup -d /dev/loop8
+	# losetup -d /dev/loop9
+	# losetup -d /dev/loop10
+	or (to detach all associated loopback devices in a system) 
+	# losetup -D
+
+
+#######################################################################################################################################
+# Section 2.
+# Revival of bootable virtual disk device for QEMU from partition raw files (after deactivation of RAID virtual disk or system reboot).
+#######################################################################################################################################
+
+1. Open terminal and change current directory to where raw partition files are located. Ad hoc
+	$ cd /ehdd/qemu/arch_hw
+
+2. Create loopback devices of all partition raw files in the following sequence (expected that all loopback devices are detached, otherwise detach them with "# losetup -D" command). Ad hoc
+	# losetup -f gpt1
+	# losetup -f sda1_bios_boot.raw
+	# losetup -f sda2_swap.raw
+	# losetup -f sda3_boot.raw
+	# losetup -f sda4_home.raw
+	# losetup -f sda5_root.raw
+	# losetup -f sda6_tmp.raw
+	# losetup -f sda7_usr.raw
+	# losetup -f sda8_var.raw
+	# losetup -f sda9_data.raw
+	# losetup -f gpt2
+	Mapping
+		partition raw file	loop device	partition size (ad hoc)
+		gpt1			loop0		-
+		sda1_bios_boot.raw	loop1		1Mib
+		sda2_swap.raw		loop2		4Gib
+		sda3_boot.raw		loop3		1Gib
+		sda4_home.raw		loop4		5Gib
+		sda5_root.raw		loop5		10Gib
+		sda6_tmp.raw		loop6		5Gib
+		sda7_usr.raw		loop7		50Gib
+		sda8_var.raw		loop8		15Gib
+		sda9_data.raw		loop9		10Gib
+		gpt2			loop10		-
+
+3. Create the "merged" first part of GPT Partition Table + partition raw files + second part of GPT Partition Table. Can do this using software RAID in linear mode (need the linear.ko kernel driver) and a loopback devices: the trick is to dynamically prepend the first part and append the second part of GPT Partition Table to the partition raw files wish to embed in a QEMU virtual disk device. The resulting /dev/md0 is what will used as this device (parameter --chunk= should divide size of gpt1, gpt2 and all partition raw files, --raid-devices= should be equal to the sum of loopback devices). Ad hoc
+	# modprobe linears
+	# mdadm --build --verbose /dev/md0 --chunk=16K --level=linear --raid-devices=11 /dev/loop0 /dev/loop1 /dev/loop2 /dev/loop3 /dev/loop4 /dev/loop5 /dev/loop6 /dev/loop7 /dev/loop8 /dev/loop9 /dev/loop10 
+
+4. Set the permissions to /dev/md0 device file so that the emulator can access it
+	# chmod o=rw /dev/md0
+
+5. Start virtual machine with virtual disk drive and boot system
+	$ qemu-system-x86_64 -enable-kvm -m 2G -vga virtio -display gtk,gl=on -drive file=/dev/md0,format=raw 
+
+6. After work with QEMU is finished should deactivate RAID virtual disk device and detach all engaged loopback devices. Ad hoc
+	# mdadm --stop /dev/md0
+	and
+	# losetup -d /dev/loop0
+ 	# losetup -d /dev/loop1
+	# losetup -d /dev/loop2
+	# losetup -d /dev/loop3
+	# losetup -d /dev/loop4
+	# losetup -d /dev/loop5
+	# losetup -d /dev/loop6
+	# losetup -d /dev/loop7
+	# losetup -d /dev/loop8
+	# losetup -d /dev/loop9
+	# losetup -d /dev/loop10
+	or (to detach all associated loopback devices in a system) 
+	# losetup -D
+
+########################################################
+# Section 3.
+# Recursion. Start virtual machine into virtual machine.
+########################################################
+
+1. Copy GPT parts files and partition raw files created earlier for virtual disk device into new directory. Ad hoc
+	$ cp /ehdd/arch_hw /ehdd/arch_hw_lvl2
+
+2. Start first virtual machine with virtual disk drive (created virtual disk device for QEMU is assumed, see Section 1 and 2) and able to access shared directory /ehdd/arch_hw_lvl2 on host 10.0.2.4 (Samba server). Don't forget to set the permissions to virtual disk device so that the emulator can access it (see step 4 in Section 2). Ad hoc
+	$ qemu-system-x86_64 -enable-kvm -m 2G -vga virtio -display gtk,gl=on -soundhw ac97 -net nic -net user,smb=/ehdd/arch_hw_lvl2 -drive file=/dev/md0,format=raw
+
+3. Enable network if required. Ad hoc
+	# dhcpcd ens3
+
+4. Mount shared directory from remote samba server (host machine). Ad hoc
+	# mount -t cifs //10.0.2.4/qemu /mnt/smb -o guest
+
+5. Open terminal and change current directory to mounted shared directory. Ad hoc
+	$ cd /mnt/smb
+
+6. Restore bootable virtual disk device for QEMU (see Section 2, steps 1-4)
+
+7. Change a partition UUID of all partitions except BIOS boot (md0p1). Ad hoc 
+	# swaplabel -U `uuidgen` /dev/md0p2
+	# e2fsck -f /dev/md0p3
+	# tune2fs /dev/md0p3 -U `uuidgen`
+	...
+	# e2fsck -f /dev/md0p7
+	# tune2fs /dev/md0p7 -U `uuidgen`
+	# reiserfstune /dev/md0p8 -u `uuidgen`
+
+8. Start second virtual machine into first virtual machine. Ad hoc
+	# qemu-system-x86_64 -m 1G -drive file=/dev/md0,format=raw
+
+8. Boot Arch Linux system in fallback initramfs mode (choose appropriate item in GRUB menu).
+
+9. Mount all partition devices manually if they haven't been mounted on boot.
+
+10. Recreate the initramfs image
+	# mkinitcpio -p linux
+
+10. Restart second virtual machine.
+
+11. After work with second virtual machine is finished should deactivate RAID virtual disk device and detach all engaged loopback devices (see Section 2, step 6)

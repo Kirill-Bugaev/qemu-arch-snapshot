@@ -1,0 +1,150 @@
+##################################################################
+# Create QEMU hard disk image with Arch Linux cloned from hardware
+##################################################################
+
+1. Open terminal and change current directory to where QEMU hard disk image will be located. Ad hoc:
+	$ cd /ehdd/qemu/arch_hw
+
+2. Create QEMU raw file. Check disk space used by Arch Linux system with "df -h" and calculate appropriate size of QEMU hard disk image. Ad hoc
+	$ qemu-img create -f raw arch_shrinked.raw 22G
+
+3. Create GPT partition table of QEMU hard disk image and make appropriate partitions. Ad hoc
+	$ fdisk arch_shrinked.raw 
+	Partition table ad hoc
+		partition 	size (ad hoc)	type
+		1. bios_boot 	1Mib		BIOS boot
+		2. swap		1Gib		Linux swap
+		3. boot		500Mib		Linux filesystem
+		4. home		2Gib		Linux filesystem
+		5. root		2Gib		Linux filesystem
+		6. tmp		1Gib		Linux filesystem
+		7. usr		10Gib		Linux filesystem
+		8. var		4Gib		Linux filesystem
+		9. data		1Gib		Linux filesystem
+
+4. Create loopback device for QEMU hard disk image. Expected that all loopback devices are detached, otherwise detach them with "# losetup -D" command. Ad hoc
+	# losetup -f -P arch_shrinked.raw
+
+5. Make swap on loopback swap partition
+	# mkswap /dev/loop0p2
+
+6. Format partitions (3-9 ad hoc) of new QEMU loopback device to appropriate file systems. Ad hoc
+	# mkfs.ext4 /dev/loop0p3
+	...
+	# mkfs.ext4 /dev/loop0p7
+	# mkfs.reiserfs /dev/loop0p8
+	# mkfs.ntfs -f /dev/loop0p9
+
+7. Now need to copy all files from Arch Linux hardware partitions to QEMU hard disk image. Create appropriate directories (mount points) for source and destination partitions. Create loopback device for source hardware partition. Mount hardware loopback partition to source directory read only and corresponding QEMU loopback partition to destination directory. Copy all files from source to destination. Then unmount hardware loopback and QEMU loopback partitions and detach loopback device of hardware partition. Repeat this procedure for every Arch Linux hardware partition (sda5-sda7, sda9, sda10 ad hoc) except tmp (sda8 ad hoc) and data (sda11 ad hoc) partitions. Don't forget change N count of loop0pN device to appropriate. Parameter "-a" for "cp" is important(!), without it files attributes (mode, ownership, time‐stamps) and additional attributes (context, links, xattr, all) aren't copied and guest QEMU vm will login correct only for root, also it enables copy directories recursively. Ad hoc
+	# mkdir /mnt/source_part
+	# mkdir /mnt/dest_part
+	# ----------------------
+	# losetup -f /dev/sda5
+	# mount -o ro /dev/loop1 /mnt/source_part 
+	# mount /dev/loop0p3 /mnt/dest_part
+	# cp -av /mnt/source_part/* /mnt/dest_part
+	# umount /dev/loop1 
+	# umount /dev/loop0p3
+	# losetup -d /dev/loop1
+	# ----------------------
+	...
+	# ----------------------
+	# losetup -f /dev/sda10
+	# mount -o ro /dev/loop1 /mnt/source_part 
+	# mount /dev/loop0p8 /mnt/dest_part
+	# cp -av /mnt/source_part/* /mnt/dest_part
+	# umount /dev/loop1 
+	# umount /dev/loop0p8
+	# losetup -d /dev/loop1
+	# ----------------------
+
+8. Need (ad hoc, not necessary) to copy some applications data files into data partition of QEMU hard disk image ad hoc
+	# losetup -f /dev/sda11
+	# mount -o ro /dev/loop1 /mnt/source_part 
+	# mount /dev/loop0p9 /mnt/dest_part
+	# cp -av /mnt/source_part/arch_sysfiles /mnt/dest_part
+	# umount /dev/loop1 
+	# umount /dev/loop0p9
+	# losetup -d /dev/loop1
+
+9. Correct Arch Linux system into QEMU hard disk image
+	a. Create a directory where root partition of QEMU loopback device will be mounted and mount it. Ad hoc
+		# mkdir /mnt/chroot
+		# mount /dev/loop0p5 /mnt/chroot 
+
+	b. Mount other partitions of QEMU loopback device correspondingly. Ad hoc
+		partition	mount point
+		/dev/loop0p3	/mnt/chroot/boot
+		/dev/loop0p4	/mnt/chroot/home
+		/dev/loop0p6	/mnt/chroot/tmp
+		/dev/loop0p7	/mnt/chroot/usr
+		/dev/loop0p8	/mnt/chroot/var
+		/dev/loop0p9	/mnt/chroot/data
+
+	c. Save listing of lsblk command to lsblk_listing.txt. Ad hoc
+		# lsblk -f /dev/loop0 | sudo tee /mnt/chroot/tmp/lsblk_listing.txt
+
+	d. Change root into /mnt/chroot directory ad hoc
+		# arch-chroot /mnt/chroot
+
+	e. Correct /boot/grub/grub.cfg and /etc/fstab according to the lsblk_listing.txt file (/tmp/lsblk_listing.txt ad hoc). Don't forget to omit "/mnt/chroot" if mountpoints in /etc/fstab should be corrected; loop0pN partition will correspond (after QEMU start) sdaN partition on QEMU hard disk image ad hoc. Make other corrections if it is necessary (correct resume=UUID= kernel parameter in /boot/grub/grub.cfg and switch off /win7/win7_boot and /win7/win7_os mount points in /etc/fstab ad hoc).
+
+	f. Install GRUB on QEMU loopback device. Ad hoc
+		# grub-install --target=i386-pc /dev/loop0
+
+	g. Exit the chroot environment
+		$ exit
+
+	h. Unmount all partitions of QEMU loopback device device in following order and detach loopback device. Ad hoc
+		# umount /dev/loop0p3
+		# umount /dev/loop0p4
+		# umount /dev/loop0p6
+		# umount /dev/loop0p7
+		# umount /dev/loop0p8
+		# umount /dev/loop0p9
+		# umount /dev/loop0p5
+		# losetup -d /dev/loop0
+
+	i. Start virtual machine with embedded QEMU raw file
+		$ qemu-system-x86_64 -enable-kvm -m 2G -vga virtio -display gtk,gl=on -soundhw ac97 -drive file=arch_shrinked.raw,format=raw
+
+	j. Boot the system in fallback initramfs mode (choose appropriate item in GRUB menu). To show GRUB menu for a boot press and hold Shift.
+
+	m. Switch off hibernation. Delete "resume" hook in /etc/mkinitcpio.conf ad hoc
+		HOOKS="base udev ^_resume_^ autodetect modconf block filesystems keyboard fsck usr shutdown"
+	and delete "resume" kernel parameter in /boot/grub/grub.cfg ad hoc
+		linux   /vmlinuz-linux root=UUID=677ae77d-7b09-4ab4-8326-f0e08b16909d ^_resume=UUID=dbc11ded-29b4-4a44-a8a0-d444237a9d8a_^ rw  quite
+
+	l. Recreate the initramfs images
+		# mkinitcpio -p linux
+		# mkinitcpio -p linux-custom
+
+	m. Shutdown or restart virtual machine.
+
+10. Start virtual machine with embedded with embedded QEMU hard disk image and boot the system
+	$ qemu-system-x86_64 -enable-kvm -m 2G -vga virtio -display gtk,gl=on -soundhw ac97 -drive file=arch_shrinked.raw,format=raw 
+
+11. Disable 
+	internet_on,
+	make_tap_if_for_qemu or/and make_bridge_if_for_qemu or/and make_vde_for_qemu,
+	dhcpd4,
+	smb,
+	smartd,
+	postfix (optional),
+	atd (optional),
+	cronie (optional)
+and other systemd services wich can screw up functioning of vm and and will not be used by guest machine. Ad hoc
+	# systemctl disable internet_on
+	# systemctl disable make_tap_if_for_qemu
+	...
+
+12. Could switch off automatic login for user. Comment the following strokes in /etc/systemd/system/getty@tty1.service.d/override.conf ad hoc
+	[Service]
+	Type=simple
+	ExecStart=
+	ExecStart=-/usr/bin/agetty --autologin user1 --noclear %I $TERM
+
+13. Switch off autostart X at login for user. Comment the following strokes in /home/user1/.bash_profile ad hoc
+	if [[ ! $DISPLAY && $XDG_VTNR -eq 1 ]]; then
+	  startx &> /dev/null
+	fi
